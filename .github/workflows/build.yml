@@ -4,45 +4,66 @@ name: Build FLM BOOST APK
 on:
   workflow_dispatch:
   push:
-    branches:
-      - main
+    branches: [main]
 
 permissions:
   contents: read
 
 jobs:
   build:
-    name: Build Android APK
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 35
 
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
 
-      - name: Extract FLM BOOST ZIP
+      - name: Extract source ZIP
         shell: bash
         run: |
-          set -e
-
-          echo "Extracting FLM BOOST source..."
-
+          set -euo pipefail
           ZIP="FLM_BOOST_Lag_Fix_v2_Source.zip"
-
-          if [ ! -f "$ZIP" ]; then
-            echo "::error::ZIP file not found: $ZIP"
+          test -f "$ZIP" || {
+            echo "::error::Missing $ZIP"
             exit 1
-          fi
-
+          }
           unzip -o "$ZIP" -d .
-
-          echo "Checking Android project..."
-
           test -f settings.gradle.kts
-          test -f build.gradle.kts
           test -f app/build.gradle.kts
 
-          echo "Source extracted successfully."
+      - name: Fix Java and Kotlin JVM targets
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("app/build.gradle.kts")
+          s = p.read_text()
+
+          if "sourceCompatibility" not in s:
+              s = s.replace(
+                  "    defaultConfig {",
+                  """    compileOptions {
+                      sourceCompatibility = JavaVersion.VERSION_17
+                      targetCompatibility = JavaVersion.VERSION_17
+                  }
+                  defaultConfig {""",
+                  1
+              )
+
+          if "jvmTarget" not in s:
+              s = s.replace(
+                  "    defaultConfig {",
+                  """    kotlinOptions {
+                      jvmTarget = "17"
+                  }
+                  defaultConfig {""",
+                  1
+              )
+
+          p.write_text(s)
+          print(s)
+          PY
 
       - name: Setup Java 17
         uses: actions/setup-java@v4
@@ -51,38 +72,12 @@ jobs:
           java-version: '17'
 
       - name: Setup Android SDK
-        shell: bash
-        run: |
-          set -e
-
-          SDK="$HOME/android-sdk"
-
-          mkdir -p "$SDK/cmdline-tools"
-          mkdir -p /tmp/flm-sdk
-
-          cd /tmp/flm-sdk
-
-          curl -fL --retry 3 \
-            -o tools.zip \
-            https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
-
-          unzip -q tools.zip
-
-          mv cmdline-tools "$SDK/cmdline-tools/latest"
-
-          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
-          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
-
-          echo "$SDK/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
-          echo "$SDK/platform-tools" >> "$GITHUB_PATH"
+        uses: android-actions/setup-android@v3
+        with:
+          cmdline-tools-version: 11076708
 
       - name: Install Android SDK
-        shell: bash
         run: |
-          set -e
-
-          yes | sdkmanager --licenses >/dev/null || true
-
           sdkmanager \
             "platform-tools" \
             "platforms;android-35" \
@@ -93,75 +88,21 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      - name: Configure Gradle repositories
-        shell: bash
-        run: |
-          mkdir -p ~/.gradle/init.d
-
-          cat > ~/.gradle/init.d/repos.gradle <<'EOF'
-          settingsEvaluated { settings ->
-              settings.pluginManagement.repositories {
-                  google()
-                  mavenCentral()
-                  gradlePluginPortal()
-              }
-          }
-          EOF
-
-          cat >> gradle.properties <<'EOF'
-
-          org.gradle.daemon=false
-          org.gradle.parallel=false
-          org.gradle.caching=true
-          org.gradle.workers.max=2
-          org.gradle.internal.http.connectionTimeout=120000
-          org.gradle.internal.http.socketTimeout=120000
-          org.gradle.internal.repository.max.retries=3
-          org.gradle.internal.repository.initial.backoff=1000
-          EOF
-
-      - name: Build FLM BOOST APK
+      - name: Build APK
         shell: bash
         run: |
           set -o pipefail
-
-          for attempt in 1 2 3; do
-            echo "Build attempt $attempt / 3"
-
-            if gradle :app:assembleDebug \
-              --no-daemon \
-              --stacktrace \
-              --info \
-              2>&1 | tee build.log; then
-
-              echo "APK BUILD SUCCESS"
-              exit 0
-            fi
-
-            if [ "$attempt" -eq 3 ]; then
-              echo "::error::APK build failed after 3 attempts"
-              exit 1
-            fi
-
-            echo "Retrying build..."
-            sleep 15
-          done
+          gradle :app:assembleDebug \
+            --no-daemon \
+            --stacktrace \
+            2>&1 | tee build.log
 
       - name: Prepare APK
-        shell: bash
         run: |
-          set -e
-
-          APK="app/build/outputs/apk/debug/app-debug.apk"
-
-          test -f "$APK"
-
           mkdir -p output
-
-          cp "$APK" output/FLM-BOOST-Lag-Fix.apk
-
-          echo "APK ready:"
-          ls -lh output/
+          cp \
+            app/build/outputs/apk/debug/app-debug.apk \
+            output/FLM-BOOST-Lag-Fix.apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
@@ -169,7 +110,6 @@ jobs:
           name: FLM-BOOST-Lag-Fix-APK
           path: output/FLM-BOOST-Lag-Fix.apk
           if-no-files-found: error
-          retention-days: 30
 
       - name: Upload build logs on failure
         if: failure()
